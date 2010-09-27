@@ -1,0 +1,28 @@
+*****************
+ 1. INSTALLATION
+*****************
+
+Just put all files in a directory that is on PATH.
+vs2make2 requires Perl version 5.6 or later.
+
+*****************
+ 2. HOW TO USE
+*****************
+
+Copy your Visual Studio projects to a Linux environment.
+Run vs2make2 at the project root. Do the command line below to
+see the document.
+
+$ perldoc vs2make2
+
+*****************
+ 3. LICENSE
+*****************
+
+"Artistic License" http://dev.perl.org/licenses/artistic.html
+
+or
+
+"Gnu General Public License ver3 or any later version"
+http://www.gnu.org/licenses/gpl.html
+

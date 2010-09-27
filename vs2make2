@@ -1,0 +1,583 @@
+#!/usr/bin/env perl
+
+use strict;
+
+require 5.6.0;
+
+use Getopt::Long;
+use FileHandle;
+use File::Find;
+use Cwd;
+use MiscLib;
+
+my $flag_man           = 0;
+my $flag_help          = 0;
+my $flag_force         = 0;
+my $flag_recursive     = 0;
+my $flag_usedistcc     = 0;
+my $param_fromencoding = "sjis";
+my $param_toencoding   = "euc-jp";
+
+GetOptions ('force'  => \$flag_force,
+            'rec'    => \$flag_recursive,
+            'distcc' => \$flag_usedistcc,
+            'man'    => \$flag_man,
+            'help'   => \$flag_help
+		    );
+
+use constant VERSION_STRING => '3.00';
+
+unless( @ARGV == 0 or @ARGV == 1 ) {
+	print STDERR "usage: vs2make2 [options..] [VS solution file]";
+	exit;
+}
+
+pod2usage(1) if $flag_help;
+pod2usage(-verbose => 2) if $flag_man;
+
+my @VSSolutionFiles = <*.sln>;
+
+unless(@VSSolutionFiles > 0) {
+	recursive_call_myself() if($flag_recursive);
+} else {
+	my $makefilename = 'makefile';
+	if(-e $makefilename){
+	    print STDERR "There exists '$makefilename' already,\n";
+	    if($flag_force) {
+	        print STDERR "but continue because --force option is specified\n";
+	    } else {
+	        print STDERR "maybe the project is already converted to GNU make style.\n";
+	        exit;
+	    }
+	}
+	my %settings;
+	sub setdefault {
+	    my ($key, $value) = @_;
+	    $settings{$key} = $value unless(defined $settings{$key});
+	}
+	loadvs2makercfile(\%settings);
+	setdefault('DEBUGCC'    , 'gcc');
+	setdefault('RELEASECC'  , 'gcc');
+	setdefault('DEBUGCXX'   , 'g++');
+	setdefault('RELEASECXX' , 'g++');
+	setdefault('DEBUGLD'    , 'g++');
+	setdefault('RELEASELD'  , 'g++');
+	setdefault('DEBUGCFLAGS'     , '');
+	setdefault('DEBUGCFLAGS2'    , '');
+	setdefault('DEBUGCXXFLAGS'   , '');
+	setdefault('DEBUGCXXFLAGS2'  , '');
+	setdefault('DEBUGLDFLAGS'    , '');
+	setdefault('DEBUGLDFLAGS2'   , '');
+	setdefault('RELEASECFLAGS'   , '-O2 -DNDEBUG -D_NDEBUG');
+	setdefault('RELEASECFLAGS2'  , '');
+	setdefault('RELEASECXXFLAGS' , '-O2 -DNDEBUG -D_NDEBUG');
+	setdefault('RELEASECXXFLAGS2', '');
+	setdefault('RELEASELDFLAGS'  , '');
+	setdefault('RELEASELDFLAGS2' , '');
+	setdefault('OPTIONCFLAGS'    , '-g -pthread');
+	setdefault('OPTIONCFLAGS2'   , '');
+	setdefault('OPTIONCXXFLAGS'  , '-g -pthread');
+	setdefault('OPTIONCXXFLAGS2' , '');
+	setdefault('OPTIONLDFLAGS'   , '-pthread');
+	setdefault('OPTIONLDFLAGS2'  , '');
+	setdefault('ADDITIONALCLEAN' , '');
+
+	recursively_convert_encoding();
+	my @configs;
+	for my $VSSolution (@VSSolutionFiles) {
+	    if(open FH, "< $VSSolution") {
+	    	my $VSSolutionDir = get_dirbase($VSSolution);
+	        while(<FH>) {
+	            chomp;
+	            chop if(/\r$/);
+	            if(m|^\s*Project\(\"[^"]+\"\)\s*\=\s*\"([^"]*)\"\s*,\s*\"([^"]*)\"|) {
+	                my $projectName     = $1;
+	                my $projectFilePath = $2;
+	                my $configHash =
+						process_vsproject_file(\%settings, $VSSolutionDir,
+						                       $projectName, $projectFilePath);
+					push(@configs, { name => $projectName,
+					                 proj => $projectFilePath,
+					                 conf => $configHash}         );
+	            }
+	        }
+	        close FH;
+	    }
+	}
+	create_solution_makefile(\@configs);
+}
+
+sub create_solution_makefile($)
+{
+	my $configsHash = shift;
+	my $makefilename = "makefile";
+	if(!-e $makefilename || $flag_force) {
+		my $fh = new FileHandle "> $makefilename";
+		if($fh) {
+			my %targets;
+			{
+	            for my $cHash (@{$configsHash}) {
+	                for(keys %{$cHash->{conf}}) {
+	                	push(@{$targets{$_}}, get_dir_name($cHash->{proj}));
+	                }
+	            }
+	        }
+	        my @sortedTargetKeys = sort keys %targets;
+
+			output_makefile_header($fh);
+			print $fh "all : ", join(' ', @sortedTargetKeys), "\n\n";
+			print $fh ".PHONY : ", join(' ', @sortedTargetKeys), "\n\n";
+			for my $target (@sortedTargetKeys) {
+				print $fh "$target:\n";
+				for my $directory (@{$targets{$target}}) {
+					print $fh "\t+make -j -C $directory \${OPTS}\n";
+				}
+				print $fh "\n";
+			}
+			print $fh ".PHONY: clean\n";
+			print $fh "clean:\n";
+			my %alreadyCleanedDirectory;
+			for my $target (@sortedTargetKeys) {
+				for my $directory (@{$targets{$target}}) {
+					unless($alreadyCleanedDirectory{$directory}) {
+						print $fh "\tmake clean -C $directory\n";
+						$alreadyCleanedDirectory{$directory} = 1;
+					}
+				}
+			}
+			$fh->close();
+		} else {
+			print STDERR "WARNING: could not open '$makefilename'\n";
+			print STDERR "         $?\n";
+		}
+	}
+}
+
+sub get_dirbase($)
+{
+	my $pathName = shift;
+	if($pathName =~ m|[/\\]|) {
+		$pathName =~ s|[/\\][^/\\]*$||;
+		return "." if($pathName eq '');
+		return $pathName;
+	} else {
+		return ".";
+	}
+}
+
+sub process_vsproject_file($$$$)
+{
+	my $setting      = shift;
+	my $solutionDir  = shift;
+	$solutionDir .= "/";
+	my $projName     = shift;
+	my $projFilePath = shift;
+    $projFilePath =~ s|\\|/|g;
+	my $fh = new FileHandle "< $projFilePath";
+	unless($fh) {
+		print STDERR "WARNING: cannot open '$projFilePath' at " . getcwd() . "\n";
+		return;
+	}
+
+	my $projFileDir  = get_dirbase($projFilePath) . "/";
+	my $configurationName     = undef;
+	my $outputDirString       = undef;
+	my $intermediateDirString = undef;
+	my $mode_configuration = 0;
+	my $mode_file          = 0;
+	my %configurations;
+	my @files;
+	while(<$fh>) {
+		chomp;
+		chop if(/\r$/);
+		s|^\s+||;
+		s|\s+$||;
+		if(m|^<Configuration$|) {
+			$configurationName     = undef;
+			$outputDirString       = undef;
+			$intermediateDirString = undef;
+			$mode_configuration = 1;
+		} elsif(m|^<File$|) {
+			$mode_file = 1;
+		} elsif($mode_configuration) {
+			if(m/^Name="([^|"]*)(\|([^"]*))?\"$/ && !defined($configurationName)) {
+	            $configurationName = $1;
+	            my $platform = $3; # may be ignored. (Expected 'Win32')
+	            $configurationName =~ tr/A-Z/a-z/;
+	            $configurationName = $configurationName;
+	        } elsif (m|^OutputDirectory\s*=\s*"([^"]*)\"$|) {
+	            $outputDirString = $1;
+	            $outputDirString =~ s|\$\(SolutionDir\)|$solutionDir|g;
+	            $outputDirString =~ s|\$\(ConfigurationName\)|$configurationName|g;
+	            unless($outputDirString =~ m|^[/\\\.]|) {
+	            	$outputDirString = $projFileDir . $outputDirString;
+	            }
+	        } elsif (m|^IntermediateDirectory\s*=\s*"([^"]*)\"$|) {
+	            $intermediateDirString = $1;
+	            $intermediateDirString =~ s|\$\(ConfigurationName\)|$configurationName|g;
+	            unless($intermediateDirString =~ m|^[/\\\.]|) {
+	            	$intermediateDirString = $projFileDir . $intermediateDirString;
+	            }
+	        } elsif (m|</Configuration>|) {
+	        	#$outputDirString = "." if($outputDirString eq '');
+	        	#$intermediateDirString = "." if($intermediateDirString eq '');
+	            $configurations{$configurationName} = {
+	                outdir => $outputDirString,
+	                tmpdir => $intermediateDirString
+	            };
+				$mode_configuration = 0;
+	        }
+	    } elsif($mode_file) {
+	    	if(m|RelativePath="([^"]*)"|) {
+				my $pathName = $1;
+				$pathName =~ s|\\|/|g;
+				push(@files, $pathName);
+	    	} elsif(m|</File>|) {
+	    		$mode_file = 0;
+	    	}
+	    }
+	}
+	$fh->close();
+	create_makefile($setting, $projFileDir, $outputDirString,
+	                "$projFileDir/makefile", $projName,
+	                \@files, \%configurations);
+	# Following codes commented out are left for debugging.
+	# print STDERR "PROJECT = $projFilePath\n";
+	# print STDERR "FILES\n";
+	# for(@files) {print STDERR "\t$_\n";}
+	# while(my($k,$v)=each %configurations) {
+	#	print STDERR "TITLE=$k\n";
+	#	print STDERR "\tOUT=", $v->{outdir},"\n";
+	#	print STDERR "\tTMP=", $v->{tmpdir},"\n";
+	# }
+	return \%configurations;
+}
+
+sub output_makefile_header($)
+{
+	my $fh = shift;
+    print $fh "#\n";
+    print $fh "# This makefile is created by vs2make version " . VERSION_STRING . "\n";
+    print $fh "#\n\n";
+}
+
+sub create_makefile
+{
+	my $setting	             = shift;
+	my $projectPath          = shift;
+	my $outputPath_donotuse  = shift;
+	my $makefileFullPathName = shift;
+	my $projectName          = shift;
+	my $filesArrayHash       = shift;
+	my $configHashHash       = shift;
+
+	my $fh = new FileHandle "> $makefileFullPathName";
+	unless($fh) {
+		print STDERR "ERROR: could not open '$makefileFullPathName' for output\n";
+		return;
+	}
+	output_makefile_header($fh);
+	{	# output user keys
+		for my $key (sort keys %{$setting}) {
+			print $fh "$key=", ${$setting}{$key}, "\n";
+		}
+	}
+	print $fh "\n";
+	print $fh "#### Below are machine generated rules.\n";
+	print $fh "#### Do not edit unless you know well what you are doing.\n\n";
+	{	# define object files
+		my @compileObjects = grep { /\.(cpp|c|cc|cxx)$/i } @{$filesArrayHash};
+		print $fh "SOURCES = ";
+		print $fh join("\\\n\t", map { $_ = get_canonical_path_name($_) } @compileObjects), "\n\n";
+        my $canonicalProjectPath = get_canonical_path_name($projectPath);
+		while(my ($k, $v) = each %{$configHashHash}) {
+			my @objectFileNames = @compileObjects;
+			map {
+				s!\.(cpp|c|cc|cxx)$!\.obj!;
+				$_ = get_canonical_path_name($v->{tmpdir} . "/" . get_trunk_file_name($_));
+                # print STDERR "BEFORE: $canonicalProjectPath ($_)\n";
+                $_ = get_relative_path_name($canonicalProjectPath, $_);
+                # print STDERR "AFTER : $_\n";
+			} @objectFileNames;
+            ensure_directory(get_canonical_path_name($v->{tmpdir}));
+			my $upperk = toupper($k);
+			print $fh "${upperk}OBJS = ", join("\\\n\t", @objectFileNames), "\n\n";
+		    my $target    = get_canonical_path_name($v->{outdir} . "/$projectName");
+            ensure_directory(get_canonical_path_name($v->{outdir}));
+		    $v->{target} = $target;
+		    print $fh "$k: $target\n\n";
+		    print $fh "show${k}target:\n\t\@echo $target\n\n";
+		    print $fh "$target: \$(${upperk}OBJS)\n";
+		    print $fh "\t\$(${upperk}LD) \$(${upperk}LDFLAGS) \$(OPTIONLDFLAGS) -o \$\@ \$^ \$(${upperk}LDFLAGS2) \$(OPTIONLDFLAGS2)\n";
+		    my $repTarget = get_canonical_path_name($v->{outdir} . "/../$projectName");
+		    $v->{reptarget} = $repTarget;
+		    print $fh "\t-if [ -e $repTarget ]; then rm $repTarget; fi\n";
+		    print $fh "\t-ln -s \$\@ $repTarget\n\n";
+		    my $distccString = $flag_usedistcc ? "distcc " : "";
+	        for(my $i = 0; $i < @compileObjects; $i++) {
+	        	my $from = $compileObjects[$i];
+	        	my $to   = $objectFileNames[$i];
+	            print $fh "$to: $from\n";
+	            print $fh "\t$distccString\$(${upperk}CXX) \$(${upperk}CXXFLAGS) \$(OPTIONCXXFLAGS) -c \$^ -o \$@ \$(${upperk}CXXFLAGS2) \$(OPTIONCXXFLAGS2)\n\n";
+	        }
+		}
+	    print $fh "clean:\n";
+	    print $fh "\t-rm -f";
+	    {
+	        while(my ($k, $v) = each %{$configHashHash}) {
+	           print $fh " \$(", toupper($k), "OBJS)";
+	        }
+	    }
+	    print $fh "\n";
+		while(my ($k, $v) = each %{$configHashHash}) {
+			print $fh "\t-rm -f " . $v->{target} . "\n";
+		}
+		{
+			my %reptargets;
+			while(my ($k, $v) = each %{$configHashHash}) {
+				$reptargets{$v->{reptarget}}++;
+			}
+			print $fh "\t-rm -f ", join(' ', keys %reptargets), "\n";
+		}
+	    print $fh "\t-rm -f \$(ADDITIONALCLEAN)\n";
+		print $fh "\t-rm -f core core.* a.out\n";
+	}
+	$fh->close();
+	if(-e "postconv") {
+		my $cmd = "chmod 755 postconv && ./postconv";
+		print STDERR "$cmd\n";
+		system $cmd;
+	}
+}
+
+sub ensure_directory($)
+{
+    my $canonicalDirPath = shift;
+    system "mkdir -p $canonicalDirPath";
+	if($?) {
+		print STDERR "ERROR: could not mkdir '$canonicalDirPath'\n";
+		exit 1;
+	}
+}
+
+sub get_relative_path_name($$)
+{
+    my $root = shift;
+    my $path = shift;
+    $root =~ s|^./||g;
+    $root = '' if ($root eq '.');
+	while($root ne '') {
+        $root =~ m|^([^/]*)(/(.*))?$|;
+        my $f_root = $1;
+        my $f_rest = $3;
+        $path =~ m|^([^/]*)(/(.*))?$|;
+        my $p_root = $1;
+        my $p_rest = $3;
+        if($f_root eq $p_root) {
+            $root = $f_rest;
+            $path = $p_rest;
+        } else {
+            $root =~ s|/+$||;
+            my $numDirDepth = 1;
+            $numDirDepth++ while($root =~ m|/|g);
+            $path = ("../" x $numDirDepth) . $path;
+            last;
+        }
+    }
+    return $path;
+}
+
+sub recursively_convert_encoding
+{
+	my $iconvpath = getExecutablePath("iconv");
+	unless(defined $iconvpath) {
+	    print STDERR "'iconv', which is necessary for encoding conversion, is not found\n";
+	    exit 1;
+	}
+	my @directoryQueue = ('.');
+	while(@directoryQueue > 0) {
+		my $dir = pop(@directoryQueue);
+		print STDERR "Entering $dir\n";
+		my @filesHere = <$dir/*>;
+		for my $file (@filesHere) {
+			if(-d $file) {
+				push(@directoryQueue, $file);
+				next;
+			}
+			next unless($file =~ m|\.([^\.]*)$|);
+			my $ext = $1;
+			next unless($ext =~ /^(c|cc|cpp|cxx|h|hpp|hxx|txt)$/i);
+            my $commandLine = "iconv";
+            $commandLine .= " -f $param_fromencoding";
+            $commandLine .= " -t $param_toencoding";
+            my $newlyEncodedFile = "$file.$param_toencoding";
+            $commandLine .= " $file > $newlyEncodedFile";
+            print STDERR "% $commandLine\n"; system $commandLine;
+            if($?) {
+            	print STDERR "WARNING: failed to convert the encoding of '$file'\n";
+            	system "cp $file $newlyEncodedFile";
+            	if($?) {
+            		print STDERR "ERROR: The directory seems unwritable.\n";
+            		exit 1;
+            	}
+            }
+            my $finalFile = $file; # tolower($file);
+            my $isSourceFile = ($ext =~ /^(c|cc|cpp|cxx|h|hpp|hxx)$/i);
+            my $additionalPerlDirective = '';
+            # if($isSourceFile) {
+            #     $additionalPerlDirective = 's/^(\s*#\s*include\s*")([^"]*)(")/$1 . tolower($2) . $3/e; sub tolower{$a=shift;$a=~tr/A-Z/a-z/;$a};';
+            # }
+            my $convCRLFCommand = "perl -pe 'chomp; chop if(/\\r\$/);\$_.=\"\\n\";${additionalPerlDirective}' $newlyEncodedFile > $finalFile";
+            printAndExecute($convCRLFCommand);
+            unless(unlink($newlyEncodedFile)) {
+            	print STDERR "WARNING: failed to remove a temporary file '$newlyEncodedFile'\n";
+            }
+            if($file ne $finalFile) {
+                unless(unlink($file)) {
+                    print STDERR "WARNING: failed to remove an original source file '$file'\n";
+                }
+            }
+		}
+	}
+}
+
+sub loadvs2makercfile($)
+{
+	my $settings = shift;
+
+	my $home = $ENV{'HOME'};
+	if ($home eq '') {
+		print STDERR "Using HOMEPATH...\n";
+		$home = $ENV{'HOMEPATH'} ;
+	}
+	my $setfile = "$home/.vs2makerc";
+	if(open FH,"< $setfile"){
+		print STDERR "Reading setting file '$setfile'\n";
+		while(<FH>){
+			chomp;
+			chop if(/\r$/);
+			next if(/^$/);
+			next if(/^\s*#/);
+			/^(.*)=(.*)$/;
+			my $key = $1;
+			my $value = $2;
+			# my ($key, @values) = split(/=/);
+
+			$key    =~ s/^\s*(\S+)\s*$/$1/;
+			$value  =~ s/^\s*(\S+)\s*$/$1/;
+			$settings->{$key} = $value;
+		}
+		close FH;
+	}
+}
+
+sub recursive_call_myself
+{
+    if( @ARGV == 1 ) {
+	    print STDERR "You cannot specify vcprojfile when recursive mode is set.\n";
+	    print STDERR "Read the manual.\n";
+	    exit;
+    }
+    # listing directories.
+    my @files = `ls`;
+    for(@files){
+	    chomp;
+	    next if($_ eq '.' or $_ eq '..');
+	    if(-d $_){
+	        print "Entering into directory $_\n";
+	        my $cmdline = "cd $_; vs2make2";
+            $cmdline .= " --force" if($flag_force);
+            $cmdline .= " --distcc" if($flag_usedistcc);
+	        print "    $cmdline\n";
+	        system $cmdline;
+	    }
+    }
+}
+
+=pod
+
+=head1 NAME
+
+vs2make2 - Converts Visual Studio .NET project to GNU makefile
+
+=head1 SYNOPSYS
+
+B<vs2make2> I<[visual studio project file]>
+
+=head1 DESCRIPTION
+
+This utility is to create a makefile according to Visual Studio .NET project file
+in order to build an executable file on non-Windows platform.
+Solution and C++ Project file (*.sln, *.proj) are analyzed by this utility
+program and makefile for GNU make is generated.
+If there is no argument given on the command line, Visual Studio Project files
+(and solution files) are searched in the current directory.
+All the solution found will be converted into makefile(s).
+You can exploit some additional features by setting '~/.vs2makerc' appropriately.
+It is explained in the SETTING section.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-rec>
+
+When B<-rec> is specified, B<vs2make2> recursively traverses
+directories and converts every Visual Studio Solution File found
+into GNU makefile.
+
+Note that several other options may not be effective when B<-rec> is
+specified.
+
+=item B<-force>
+
+Ignores errors and force conversion.
+This option will be useful if you recreate a makefile.
+
+=item B<-distcc>
+
+If your system has distcc, you can specify B<-distcc> option to
+generate a makefile that exploits distcc.
+
+=item B<-man>
+
+Displays the manual.
+
+=item B<-help>
+
+Displays breif usage.
+
+=back
+
+=head1 SETTING
+
+You can specify some options in '~/.vs2makerc' to control how vs2make works.
+All options shoule be specified in a format like 'KEY=VALUE'.
+
+	DEBUGCC			C compiler for debug configuration
+	RELEASECC		C compiler for release configuration
+	DEBUGCXX		C++ compiler for debug configuration
+	RELEASECXX		C++ compiler for release configuration
+	DEBUGLD			linker for debug configuration
+	RELEASELD		linker for release configuration
+	DEBUGCFLAGS		C compiler flags for debug configuration
+	DEBUGCXXFLAGS	C++ compiler flags for debug configuration
+	DEBUGLDFLAGS	linker flags for debug configuration
+	RELEASECFLAGS	C compiler flags for release configuration
+	RELEASECXXFLAGS	C++ compiler flags for release configuration
+	RELEASELDFLAGS  linker flags for release configuration
+	OPTIONCFLAGS	C compiler flags for the both configuration
+	OPTIONCXXFLAGS	C++ compiler flags for the both configuration
+	OPTIONLDFLAGS	linker flags for the both configuration
+	ADDITIONALCLEAN	additional files to be cleaned when 'make clean'
+
+For flag options such as OPTIONCXXFLAGS or RELEASECFLAGS, there are additional
+variables with suffix '2' (e.g., OPTIONCXXFLAGS2). Those with suffix '2' are
+given after all source/object files, which might be useful for order-sensitive
+options like -l for linking.
+
+=head1 SETTING EXAMPLE
+
+
+=cut
+
