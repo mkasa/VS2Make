@@ -15,8 +15,8 @@ my $flag_help          = 0;
 my $flag_force         = 0;
 my $flag_recursive     = 0;
 my $flag_usedistcc     = 0;
-my $param_fromencoding = "sjis";
-my $param_toencoding   = "euc-jp";
+my $param_fromencoding = "cp932";
+my $param_toencoding   = "utf-8";
 
 GetOptions ('force'  => \$flag_force,
             'rec'    => \$flag_recursive,
@@ -38,7 +38,12 @@ pod2usage(-verbose => 2) if $flag_man;
 my @VSSolutionFiles = <*.sln>;
 
 unless(@VSSolutionFiles > 0) {
-	recursive_call_myself() if($flag_recursive);
+    if($flag_recursive) {
+		my $has_subdir = recursive_call_myself();
+		unless($has_subdir) {
+			recursively_convert_encoding(".");
+		}
+    }
 } else {
 	my $makefilename = 'makefile';
 	if(-e $makefilename){
@@ -407,7 +412,7 @@ sub recursively_convert_encoding
 			next unless($file =~ m|\.([^\.]*)$|);
 			my $ext = $1;
 			next unless($ext =~ /^(c|cc|cpp|cxx|h|hpp|hxx|txt)$/i);
-            my $commandLine = "iconv";
+            my $commandLine = "$iconvpath";
             $commandLine .= " -f $param_fromencoding";
             $commandLine .= " -t $param_toencoding";
             my $newlyEncodedFile = "$file.$param_toencoding";
@@ -478,12 +483,14 @@ sub recursive_call_myself
 	    print STDERR "Read the manual.\n";
 	    exit;
     }
+    my $found_any_subdir = 0;
     # listing directories.
     my @files = `ls`;
     for(@files){
 	    chomp;
 	    next if($_ eq '.' or $_ eq '..');
 	    if(-d $_){
+		$found_any_subdir = 1;
 	        print "Entering into directory $_\n";
 	        my $cmdline = "cd $_; vs2make2";
             $cmdline .= " --force" if($flag_force);
@@ -492,6 +499,7 @@ sub recursive_call_myself
 	        system $cmdline;
 	    }
     }
+    return $found_any_subdir;
 }
 
 =pod
