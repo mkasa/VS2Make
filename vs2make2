@@ -214,12 +214,15 @@ sub process_vsproject_file($$$$)
 	            $outputDirString = $1;
 	            $outputDirString =~ s|\$\(SolutionDir\)|$solutionDir|g;
 	            $outputDirString =~ s|\$\(ConfigurationName\)|$configurationName|g;
+	            $outputDirString =~ s|\$\(PlatformName\)|x86_64|g;
 	            unless($outputDirString =~ m|^[/\\\.]|) {
 	            	$outputDirString = $projFileDir . $outputDirString;
 	            }
 	        } elsif (m|^IntermediateDirectory\s*=\s*"([^"]*)\"$|) {
 	            $intermediateDirString = $1;
+	            $intermediateDirString =~ s|\$\(SolutionDir\)|$solutionDir|g;
 	            $intermediateDirString =~ s|\$\(ConfigurationName\)|$configurationName|g;
+	            $intermediateDirString =~ s|\$\(PlatformName\)|x86_64|g;
 	            unless($intermediateDirString =~ m|^[/\\\.]|) {
 	            	$intermediateDirString = $projFileDir . $intermediateDirString;
 	            }
